@@ -10,7 +10,6 @@ __pycache__/
 .coverage
 
 # Output & Logs
-Output/
 scraper.log
 checkpoint.json
 
