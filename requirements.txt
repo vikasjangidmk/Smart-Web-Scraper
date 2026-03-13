@@ -1,0 +1,18 @@
+# Web Crawler
+playwright==1.43.0
+
+# HTTP & API
+requests==2.31.0
+
+# Environment & Config
+python-dotenv==1.0.1
+pyyaml==6.0.1
+
+# HTML Parsing
+beautifulsoup4==4.12.3
+
+# Retry & Resilience
+tenacity==8.3.0
+
+# Utilities
+colorama==0.4.6

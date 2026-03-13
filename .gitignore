@@ -1,0 +1,19 @@
+# Environments
+senv/
+venv/
+.env
+
+# Cache
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+
+# Output & Logs
+Output/
+scraper.log
+checkpoint.json
+
+# IDE
+.vscode/
+.idea/
