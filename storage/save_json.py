@@ -1,6 +1,6 @@
 """
-save_json.py - Structured JSON storage with checkpoint support.
-Handles the nested schema produced by the three-stage pipeline.
+save_json.py - Structured JSON storage (Optimized).
+Now saves ONCE at end instead of per-record (major I/O optimization).
 """
 import json
 import os
@@ -16,7 +16,7 @@ CHECKPOINT_FILE = "checkpoint.json"
 
 def compute_completeness_score(record: dict) -> int:
     """
-    User-specified 5-field completeness score:
+    5-field completeness score:
     1. company_name
     2. phone
     3. gst_number
@@ -31,7 +31,6 @@ def compute_completeness_score(record: dict) -> int:
         (record.get("products_services") or {}).get("primary_offerings")
     ]
     
-    # Calculate percentage
     filled = sum(1 for f in fields if f and (isinstance(f, list) and len(f) > 0 or not isinstance(f, list)))
     score = int((filled / len(fields)) * 100)
     return score
@@ -63,7 +62,7 @@ def build_verification_summary(record: dict) -> dict:
 
 
 def save_leads(records: list[dict], output_path: str) -> None:
-    """Save all records to the output JSON file."""
+    """Save all records to the output JSON file (called ONCE at end)."""
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
@@ -72,36 +71,18 @@ def save_leads(records: list[dict], output_path: str) -> None:
 
 
 def save_checkpoint(visited_urls: list[str]) -> None:
-    """Save visited URLs so crawling can resume after interruption."""
+    """Save visited URLs for resume support."""
     with open(CHECKPOINT_FILE, "w", encoding="utf-8") as f:
         json.dump({"visited": visited_urls}, f)
-    logger.debug(f"[checkpoint] Saved {len(visited_urls)} visited URLs")
 
 
 def load_checkpoint() -> list[str]:
-    """Load previously visited URLs from checkpoint file."""
+    """Load previously visited URLs."""
     if not os.path.exists(CHECKPOINT_FILE):
         return []
     try:
         with open(CHECKPOINT_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        urls = data.get("visited", [])
-        logger.info(f"[checkpoint] Loaded {len(urls)} previously visited URLs")
-        return urls
-    except Exception as e:
-        logger.warning(f"[checkpoint] Failed to load: {e}")
+        return data.get("visited", [])
+    except Exception:
         return []
-
-
-def append_lead(record: dict, output_path: str) -> None:
-    """Append a single record to the JSON output file."""
-    out = Path(output_path)
-    existing = []
-    if out.exists():
-        try:
-            with open(out, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-        except Exception:
-            existing = []
-    existing.append(record)
-    save_leads(existing, output_path)

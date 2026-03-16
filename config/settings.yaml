@@ -1,17 +1,18 @@
 crawler:
   headless: true
-  max_delay: 8
-  max_retries: 3
-  min_delay: 3
-  retry_backoff_base: 2
-  timeout: 45000
+  max_delay: 1.0
+  max_retries: 1
+  min_delay: 0.3
+  retry_backoff_base: 1.5
+  timeout: 10000
   viewport_height: 768
   viewport_width: 1366
 
 llm:
   api_base: https://openrouter.ai/api/v1
-  html_truncate_chars: 18000
-  max_tokens: 2048
+  html_truncate_chars: 6000
+  max_tokens_extract: 800
+  max_tokens_format: 512
   model: deepseek/deepseek-chat-v3-0324
   temperature: 0
 
@@ -19,33 +20,59 @@ logging:
   file: scraper.log
   format: '%(asctime)s | %(levelname)s | %(name)s | %(message)s'
   level: INFO
+  file_level: WARNING
 
 scraper:
-  max_companies: 120
+  max_companies: 30
   output_file: leads.json
   target_records: 25
   target_state: Gujarat
+  # MANDATORY: every output record must have phone AND GST
+  require_phone: true
+  require_gst: true
 
-# Multiple separate searches to maximize company discovery
-# Each keyword+city combo is searched independently
+# Focused searches — fewer combos = faster crawl
 search_queries:
-  - keyword: "bubble wrap"
-    cities: ["Ahmedabad", "Rajkot", "Surat", "Vadodara", "Gandhinagar"]
-  - keyword: "air bubble roll"
-    cities: ["Ahmedabad", "Rajkot", "Surat"]
-  - keyword: "bubble roll manufacturers"
+  - keyword: "bubble wrap manufacturer"
+    cities: ["Ahmedabad", "Rajkot", "Surat", "Vadodara"]
+  - keyword: "air bubble roll supplier"
     cities: ["Ahmedabad", "Rajkot", "Surat"]
   - keyword: "packaging material suppliers"
-    cities: ["Ahmedabad", "Rajkot", "Surat"]
-  - keyword: "air bubble sheet"
-    cities: ["Ahmedabad", "Rajkot", "Surat"]
-  - keyword: "bubble wrap roll"
     cities: ["Ahmedabad", "Surat"]
+  - keyword: "bubble wrap roll"
+    cities: ["Ahmedabad", "Rajkot"]
+  - keyword: "air bubble sheet"
+    cities: ["Ahmedabad", "Surat", "Vadodara"]
+
+# Product keywords to check before sending to LLM (at least one must be present)
+packaging_keywords:
+  - bubble
+  - packaging
+  - packing
+  - wrap
+  - roll
+  - sheet
+  - corrugated
+  - stretch film
+  - foam
+  - cushion
+  - poly bag
+  - shrink
+  - lamination
+  - carton
+  - box
+  - tape
 
 sources:
   indiamart:
     enabled: true
-    max_pages: 5
+    max_pages: 2
+  tradeindia:
+    enabled: true
+    max_pages: 2
+  exportersindia:
+    enabled: true
+    max_pages: 1
 
 user_agents:
 - Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
@@ -57,7 +84,5 @@ user_agents:
   Gecko) Chrome/122.0.0.0 Safari/537.36
 - Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0
   Safari/537.36
-- Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
-  Edge/122.0.0.0 Safari/537.36
 - Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)
   Chrome/123.0.0.0 Safari/537.36

@@ -1,22 +1,17 @@
 """
-indiamart.py - IndiaMART B2B Marketplace Crawler (Optimized)
-=============================================================
-Optimizations:
-  1. Request interception — blocks images, fonts, CSS, media
-  2. Reduced timeouts (10s) and delays (0.3-1s)
-  3. Early stopping when target leads reached
-  4. URL caching across searches
-  5. Minimal browser resources
+tradeindia.py - TradeIndia B2B Marketplace Crawler (Optimized)
+================================================================
+Optimized with request interception, reduced timeouts, early stopping.
 """
 import re
 import random
 import time
 import yaml  # type: ignore
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from playwright.sync_api import (  # type: ignore
     sync_playwright, Page, Browser, BrowserContext,
-    TimeoutError as PWTimeout, Route
+    TimeoutError as PWTimeout, Route,
 )
 
 from utils.logger import get_logger  # type: ignore
@@ -40,10 +35,10 @@ def _get_random_ua(config: dict) -> str:
 
 
 def _build_search_url(keyword: str, city: str, page_num: int = 1) -> str:
-    """Build IndiaMART search URL — one city at a time."""
+    """Build TradeIndia search URL."""
     keyword_esc = keyword.strip().replace(" ", "+")
-    city_esc = city.strip().replace(" ", "+")
-    url = f"https://dir.indiamart.com/search.mp?ss={keyword_esc}&cq={city_esc}"
+    city_esc = city.strip().lower().replace(" ", "+")
+    url = f"https://www.tradeindia.com/search.html?keyword={keyword_esc}&city={city_esc}"
     if page_num > 1:
         url += f"&page={page_num}"
     return url
@@ -54,14 +49,14 @@ BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "stylesheet"}
 BLOCKED_URL_PATTERNS = [
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
     ".woff", ".woff2", ".ttf", ".eot",
-    ".css", ".mp4", ".mp3", ".avi",
+    ".css", ".mp4", ".mp3",
     "google-analytics", "googletagmanager", "facebook",
     "doubleclick", "analytics", "tracking",
 ]
 
 
 def _intercept_route(route: Route) -> None:
-    """Block unnecessary resources to speed up page loads."""
+    """Block unnecessary resources."""
     req = route.request
     if req.resource_type in BLOCKED_RESOURCE_TYPES:
         route.abort()
@@ -76,172 +71,114 @@ def _intercept_route(route: Route) -> None:
 
 # ─── URL CLASSIFICATION ──────────────────────────────────────────────────────
 EXCLUDE_URL_PATTERNS = [
-    "corporate.indiamart", "help.indiamart", "buyer.indiamart",
-    "seller.indiamart", "my.indiamart", "m.indiamart",
-    "shopping.indiamart", "lens.indiamart", "hindi.indiamart",
-    "export.indiamart", "paywith.indiamart", "shipwith.indiamart",
-    "/search.mp", "/impcat/", "/city/", "/messages/",
-    "#", "javascript:", "login", "register",
+    "/login", "/register", "/join_now",
+    "javascript:", "#", "/advertise",
+    "/help/", "/about/", "/sitemap",
+    "/blog/", "/newsletter/",
+    "/search.html",
 ]
 
-SUBPAGE_PATTERNS = [
-    "/testimonial", "/proddetail", "/aboutus", "/contactus",
-    "/profile", "/catalogue", "/certificate",
+COMPANY_URL_PATTERNS = [
+    re.compile(r"https?://(?:www\.)?tradeindia\.com/fp\d+/", re.IGNORECASE),
+    re.compile(r"https?://(?:www\.)?tradeindia\.com/Ede\d+/", re.IGNORECASE),
 ]
 
 
-def _normalise_to_company_root(url: str) -> str | None:
-    """Normalize any IndiaMART company URL to company ROOT profile URL."""
-    if not url or "indiamart.com" not in url.lower():
-        return None
-
+def _is_company_profile_url(url: str) -> bool:
+    if not url:
+        return False
     url_lower = url.lower()
     for pat in EXCLUDE_URL_PATTERNS:
-        if pat in url_lower:
-            return None
+        if pat.lower() in url_lower:
+            return False
+    for pattern in COMPANY_URL_PATTERNS:
+        if pattern.match(url):
+            return True
+    return False
 
+
+def _normalise_company_url(url: str) -> str | None:
+    if not url or "tradeindia.com" not in url.lower():
+        return None
+    url_lower = url.lower()
+    for pat in EXCLUDE_URL_PATTERNS:
+        if pat.lower() in url_lower:
+            return None
     try:
         parsed = urlparse(url)
         host = parsed.hostname or ""
     except Exception:
         return None
-
-    # Pattern A: subdomain company pages
-    if host.endswith(".indiamart.com") and host not in (
-        "www.indiamart.com", "dir.indiamart.com", "m.indiamart.com"
-    ):
-        subdomain = host.replace(".indiamart.com", "")
-        skip_subs = {
-            "corporate", "help", "buyer", "seller", "my", "shopping",
-            "lens", "hindi", "export", "paywith", "shipwith", "img",
-            "utils", "api", "login", "s", "cdn",
-        }
-        if subdomain in skip_subs:
-            return None
-        return f"https://www.indiamart.com/{subdomain}/"
-
-    # Pattern B: www.indiamart.com/company-name/...
-    if host in ("www.indiamart.com", "indiamart.com"):
-        path = parsed.path.strip("/")
-        if not path:
-            return None
-        segments = path.split("/")
-        if not segments or not segments[0]:
-            return None
-        company_slug = segments[0]
-        non_company_slugs = {
-            "search", "impcat", "city", "proddetail", "messages",
-            "help", "about", "contact", "privacy", "terms",
-            "html", "xml", "js", "css",
-        }
-        if company_slug.lower() in non_company_slugs:
-            return None
-        return f"https://www.indiamart.com/{company_slug}/"
-
+    if host not in ("www.tradeindia.com", "tradeindia.com"):
+        return None
+    path = parsed.path.strip("/")
+    if not path:
+        return None
+    segments = path.split("/")
+    if not segments or not segments[0]:
+        return None
+    first_segment = segments[0]
+    if re.match(r"^(fp|Ede)\d+$", first_segment, re.IGNORECASE):
+        return f"https://www.tradeindia.com/{first_segment}/"
     return None
 
 
 def _extract_company_links_from_search(page: Page) -> list[str]:
-    """Extract unique company profile ROOT URLs from search results."""
+    """Extract company profile URLs from search results."""
     raw_urls: set[str] = set()
-
-    # Strategy 1: CSS selectors for company name links
+    
     selectors = [
-        "a.lcname", ".organic-card a", ".lst-crd-cnt a",
-        ".company-name a", "h3.company-name a", ".sup-name a",
-        ".supplierName a", "h3 a[href*='indiamart']",
-        ".cname a", "[class*='company'] a[href*='indiamart']",
-        "[class*='supplier'] a[href*='indiamart']",
-        ".cardlinks a", ".flx99 a",
+        "a[href*='/fp']", "a[href*='/Ede']",
+        ".company-name a", ".comp-name a",
+        "h2 a[href*='tradeindia.com']", "h3 a[href*='tradeindia.com']",
+        ".product-card a[href*='tradeindia.com/fp']",
+        ".srp-card a[href*='tradeindia.com']",
+        ".listing a[href*='tradeindia.com/fp']",
+        "[class*='company'] a", "[class*='supplier'] a",
     ]
     for sel in selectors:
         try:
             for el in page.query_selector_all(sel):
                 href = el.get_attribute("href") or ""
                 if href:
-                    raw_urls.add(href.split("?")[0])
+                    full = href if href.startswith("http") else urljoin("https://www.tradeindia.com/", href)
+                    raw_urls.add(full.split("?")[0])
         except Exception:
             pass
-
-    # Strategy 2: All anchors pointing to indiamart
-    try:
-        all_anchors = page.query_selector_all("a[href*='indiamart.com']")
-        for anchor in all_anchors:
-            try:
-                href = anchor.get_attribute("href") or ""
-                raw_urls.add(href.split("?")[0].rstrip("/") + "/")
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    # Strategy 3: Regex extraction from raw page HTML
+    
     try:
         content = page.content()
-        subdomain_matches = re.findall(
-            r'https?://([a-z0-9\-]+)\.indiamart\.com',
+        fp_matches = re.findall(
+            r'https?://(?:www\.)?tradeindia\.com/(fp\d+)/?',
             content, re.IGNORECASE
         )
-        for sub in subdomain_matches:
-            raw_urls.add(f"https://{sub}.indiamart.com/")
-
-        path_matches = re.findall(
-            r'https?://(?:www\.)?indiamart\.com/([a-z0-9\-]+)/?',
-            content, re.IGNORECASE
-        )
-        for slug in path_matches:
-            raw_urls.add(f"https://www.indiamart.com/{slug}/")
+        for fp in fp_matches:
+            raw_urls.add(f"https://www.tradeindia.com/{fp}/")
     except Exception:
         pass
-
-    # Normalise all URLs to company root profiles
-    company_roots: set[str] = set()
+    
+    company_urls: set[str] = set()
     for url in raw_urls:
-        root = _normalise_to_company_root(url)
-        if root:
-            company_roots.add(root)
-
-    result = list(company_roots)
-    logger.info(f"[indiamart] Extracted {len(result)} unique company root profiles")
+        norm = _normalise_company_url(url)
+        if norm:
+            company_urls.add(norm)
+    
+    result = list(company_urls)
+    logger.info(f"[tradeindia] Extracted {len(result)} company profiles")
     return result
 
 
-def _click_view_mobile(page: Page) -> None:
-    """Click 'View Mobile Number' buttons to reveal hidden phone numbers."""
-    btn_selectors = [
-        "button:has-text('View Mobile Number')",
-        "span:has-text('View Mobile Number')",
-        "a:has-text('View Mobile Number')",
-        "button:has-text('Contact Supplier')",
-        ".view-mobile-number",
-        "[class*='mobile-number']",
-        "button:has-text('Get Phone')",
-        "[data-show-phone]",
-    ]
-    for sel in btn_selectors:
-        try:
-            btns = page.query_selector_all(sel)
-            for btn in btns[:2]:  # Max 2 clicks to save time
-                if btn.is_visible():
-                    btn.click(force=True, timeout=2000)
-                    page.wait_for_timeout(500)
-        except Exception:
-            pass
-
-
 def _detect_captcha(page: Page) -> bool:
-    """Return True if CAPTCHA/bot detection is present."""
     try:
         content = page.content().lower()
     except Exception:
         return False
     signals = ["captcha", "recaptcha", "i am not a robot",
-               "verify you are human", "hcaptcha", "access denied"]
+               "verify you are human", "access denied", "blocked"]
     return any(s in content for s in signals)
 
 
 def _scroll_page(page: Page, steps: int = 3) -> None:
-    """Scroll page incrementally to trigger lazy-loaded content."""
     try:
         for i in range(steps):
             page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {(i+1)/steps})")
@@ -250,36 +187,33 @@ def _scroll_page(page: Page, steps: int = 3) -> None:
         pass
 
 
-def crawl_indiamart(
-    keyword: str | None = None,
-    city: str | None = None,
-    max_companies: int = 35,
-    max_pages: int = 3,
+def crawl_tradeindia(
+    max_companies: int = 30,
+    max_pages: int = 2,
     visited_urls: list[str] | None = None,
 ) -> list[tuple[str, str]]:
-    """
-    Crawl IndiaMART using MULTIPLE keyword + city combinations.
-    Optimized with request interception and early stopping.
-    """
+    """Crawl TradeIndia with request interception and early stopping."""
     config = _load_config()
     crawler_cfg = config.get("crawler", {})
     search_queries = config.get("search_queries", [])
     sources_cfg = config.get("sources", {})
-    im_max_pages = sources_cfg.get("indiamart", {}).get("max_pages", max_pages)
-
+    ti_cfg = sources_cfg.get("tradeindia", {})
+    
+    if not ti_cfg.get("enabled", True):
+        logger.info("[tradeindia] Disabled in config")
+        return []
+    
+    ti_max_pages = ti_cfg.get("max_pages", max_pages)
     visited: set[str] = set(visited_urls or [])
     results: list[tuple[str, str]] = []
-
+    
     headless = crawler_cfg.get("headless", True)
     timeout = crawler_cfg.get("timeout", 10000)
-
+    
     if not search_queries:
-        if keyword and city:
-            search_queries = [{"keyword": keyword, "cities": [city]}]
-        else:
-            logger.error("[indiamart] No search queries configured!")
-            return []
-
+        logger.error("[tradeindia] No search queries configured!")
+        return []
+    
     with sync_playwright() as p:
         ua = _get_random_ua(config)
         browser: Browser = p.chromium.launch(
@@ -292,11 +226,9 @@ def crawl_indiamart(
                 "--disable-gpu",
                 "--disable-extensions",
                 "--disable-background-networking",
-                "--disable-default-apps",
                 "--no-first-run",
             ],
         )
-
         context: BrowserContext = browser.new_context(
             user_agent=ua,
             viewport={
@@ -311,20 +243,18 @@ def crawl_indiamart(
                 "Referer": "https://www.google.com/",
             },
         )
-
-        # Mask automation signals
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             window.chrome = { runtime: {} };
             Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
         """)
 
-        # Enable request interception to block images/CSS/fonts
+        # Enable request interception
         context.route("**/*", _intercept_route)
-
-        # ── Phase 1: Collect company URLs from all search queries ─────────
+        
+        # ── Phase 1: Collect company URLs ─────────────────────────────────
         all_company_urls: set[str] = set()
-
+        
         for query in search_queries:
             kw = str(query.get("keyword", ""))
             cities = query.get("cities", [])
@@ -333,100 +263,93 @@ def crawl_indiamart(
                 city_str = str(city_name)
                 if len(all_company_urls) >= max_companies:
                     break
-
-                logger.info(f"[indiamart] 🔍 '{kw}' in {city_str}")
-
-                for page_num in range(1, im_max_pages + 1):
+                
+                logger.info(f"[tradeindia] 🔍 '{kw}' in {city_str}")
+                
+                for page_num in range(1, ti_max_pages + 1):
                     if len(all_company_urls) >= max_companies:
                         break
-
+                    
                     search_url = _build_search_url(kw, city_str, page_num)
-
                     page = None
                     try:
                         page = context.new_page()  # type: ignore
                         page.goto(search_url, wait_until="domcontentloaded", timeout=timeout)
                         random_delay(0.2, 0.5)
-
+                        
                         if _detect_captcha(page):
-                            logger.warning(f"[indiamart] CAPTCHA on search page")
                             continue
-
+                        
                         _scroll_page(page, steps=2)
                         page.wait_for_timeout(300)
-
+                        
                         links = _extract_company_links_from_search(page)
                         new_count: int = 0
                         for link in links:
                             if link not in visited and link not in all_company_urls:
                                 all_company_urls.add(link)
                                 new_count = new_count + 1  # type: ignore
-
-                        logger.info(
-                            f"[indiamart] Page {page_num}: +{new_count} new "
-                            f"(total: {len(all_company_urls)})"
-                        )
+                        
+                        logger.info(f"[tradeindia] Page {page_num}: +{new_count} (total: {len(all_company_urls)})")
                         if new_count == 0 and page_num >= 2:
                             break
                     except Exception as e:
-                        logger.warning(f"[indiamart] Search failed: {e}")
+                        logger.warning(f"[tradeindia] Search failed: {e}")
                     finally:
-                        if page is not None:
+                        if page:
                             try:
                                 page.close()
                             except Exception:
                                 pass
-
+                    
                     random_delay(0.2, 0.5)
-
-        logger.info(f"[indiamart] Total unique company URLs: {len(all_company_urls)}")
-
-        # ── Phase 2: Visit each company profile page ──────────────────────
+        
+        logger.info(f"[tradeindia] Total unique URLs: {len(all_company_urls)}")
+        
+        # ── Phase 2: Visit each company profile ──────────────────────────
         url_list = list(all_company_urls)
         random.shuffle(url_list)
-
+        
         for url in url_list:
             if len(results) >= max_companies:
                 break
             if url in visited:
                 continue
-
+            
             page = None
             try:
                 page = context.new_page()  # type: ignore
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout)
                 random_delay(0.2, 0.5)
-
+                
                 if _detect_captcha(page):
                     visited.add(url)
                     continue
-
-                # Try to reveal hidden phone numbers
-                _click_view_mobile(page)
+                
                 _scroll_page(page, steps=2)
-
+                
                 html = page.content() or ""
                 if len(html) > 500:
                     results.append((url, html))
                     visited.add(url)
-                    logger.info(f"[indiamart] ✓ Collected ({len(results)}): {url}")
+                    logger.info(f"[tradeindia] ✓ Collected ({len(results)}): {url}")
                 else:
                     visited.add(url)
             except PWTimeout:
                 visited.add(url)
             except Exception as e:
-                logger.warning(f"[indiamart] Error on {url}: {e}")
+                logger.warning(f"[tradeindia] Error: {e}")
                 visited.add(url)
             finally:
-                try:
-                    if page:
+                if page:
+                    try:
                         page.close()
-                except Exception:
-                    pass
-
+                    except Exception:
+                        pass
+            
             random_delay(0.2, 0.5)
-
+        
         browser.close()
-
-    logger.info(f"[indiamart] Crawl complete. Collected {len(results)} company pages.")
+    
+    logger.info(f"[tradeindia] Crawl complete. Collected {len(results)} pages.")
     return results

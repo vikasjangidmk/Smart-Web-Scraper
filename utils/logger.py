@@ -1,10 +1,10 @@
-
 """
-logger.py - Centralized logging configuration
+logger.py - Centralized logging (Optimized)
+Console: INFO, File: WARNING (reduced verbosity for speed)
 """
 import logging
 import sys
-import yaml
+import yaml  # type: ignore
 from pathlib import Path
 
 _CONFIG_PATH = Path(__file__).parent.parent / "config" / "settings.yaml"
@@ -20,32 +20,31 @@ def _load_log_config() -> dict:
 
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Returns a named logger with file + console handlers.
-    Call once per module: logger = get_logger(__name__)
-    """
+    """Returns a named logger. Console=INFO, File=WARNING."""
     log_cfg = _load_log_config()
-    level = getattr(logging, log_cfg.get("level", "INFO").upper(), logging.INFO)
+    console_level = getattr(logging, log_cfg.get("level", "INFO").upper(), logging.INFO)
+    file_level_str = log_cfg.get("file_level", "WARNING").upper()
+    file_level = getattr(logging, file_level_str, logging.WARNING)
     fmt = log_cfg.get("format", "%(asctime)s | %(levelname)s | %(name)s | %(message)s")
     log_file = log_cfg.get("file", "scraper.log")
 
     logger = logging.getLogger(name)
     if logger.handlers:
-        return logger  # Already configured
+        return logger
 
-    logger.setLevel(level)
+    logger.setLevel(min(console_level, file_level))
     formatter = logging.Formatter(fmt)
 
-    # Console handler
+    # Console handler - shows INFO+
     ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(level)
+    ch.setLevel(console_level)
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-    # File handler
+    # File handler - shows WARNING+ only (reduced verbosity)
     try:
         fh = logging.FileHandler(log_file, encoding="utf-8")
-        fh.setLevel(level)
+        fh.setLevel(file_level)
         fh.setFormatter(formatter)
         logger.addHandler(fh)
     except Exception:

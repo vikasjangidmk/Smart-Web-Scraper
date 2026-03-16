@@ -1,15 +1,18 @@
 """
-llm_extractor.py - Two-Stage LLM Extraction Pipeline
-====================================================
-Stage 1: Raw extraction — LLM extracts only values visible in HTML.
-Stage 2: Schema formatting — LLM maps clean validated data to final schema.
-
-Zero hallucination is enforced by the data_cleaner Python layer between stages.
+llm_extractor.py - Optimized Two-Stage LLM Extraction Pipeline
+================================================================
+Optimizations:
+  1. Regex-first phone/email/GST extraction BEFORE LLM
+  2. Skip LLM if no packaging keywords found
+  3. Reduced max_tokens (800 extract, 512 format)
+  4. Aggressive HTML truncation (6000 chars)
+  5. Parallel batch support via ThreadPoolExecutor
 """
 import os
 import json
 import re
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests  # type: ignore
 from dotenv import load_dotenv  # type: ignore
 from bs4 import BeautifulSoup
@@ -27,26 +30,49 @@ MODEL_ID = "deepseek/deepseek-chat-v3-0324"
 
 # ─── HTML CLEANING ────────────────────────────────────────────────────────────
 def clean_html(html: str) -> str:
-    """
-    Remove all noise tags and return clean, readable text.
-    Preserves business-relevant sections (phone, GST, address patterns).
-    """
+    """Remove noise tags and return clean text."""
     if not html:
         return ""
     soup = BeautifulSoup(html, "html.parser")
-
-    # Remove completely useless tags
     for tag in soup(["script", "style", "nav", "footer", "head",
                      "svg", "noscript", "iframe", "form", "button",
                      "meta", "link", "img", "picture"]):
         tag.decompose()
-
-    # Get clean text
     text = soup.get_text(separator="\n", strip=True)
-
-    # Collapse excessive whitespace / blank lines
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     return "\n".join(lines)
+
+
+# ─── REGEX EXTRACTORS (run BEFORE LLM for speed) ─────────────────────────────
+PHONE_REGEX = re.compile(r"(?:\+91[\s\-]?)?(?:0)?[6-9]\d{9}")
+GST_REGEX = re.compile(r"\b[0-3][0-9][A-Z]{5}[0-9]{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b")
+EMAIL_REGEX = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+
+
+def regex_extract(text: str) -> dict:
+    """Fast regex extraction of phones, GST, emails from text."""
+    text_upper = text.upper() if text else ""
+    phones = list(set(PHONE_REGEX.findall(text or "")))
+    gsts = list(set(GST_REGEX.findall(text_upper)))
+    emails = list(set(EMAIL_REGEX.findall(text or "")))
+    return {"phones": phones[:10], "gsts": gsts[:5], "emails": emails[:5]}  # type: ignore
+
+
+# ─── PACKAGING KEYWORD CHECK ─────────────────────────────────────────────────
+PACKAGING_KEYWORDS = [
+    "bubble", "packaging", "packing", "wrap", "roll", "sheet",
+    "corrugated", "stretch", "foam", "cushion", "poly",
+    "shrink", "lamination", "carton", "box", "tape",
+    "ldpe", "hdpe", "bopp", "thermocol", "epe",
+]
+
+
+def has_packaging_content(text: str) -> bool:
+    """Check if text is related to packaging/bubble products."""
+    if not text:
+        return False
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in PACKAGING_KEYWORDS)
 
 
 # ─── STAGE 1 PROMPT ──────────────────────────────────────────────────────────
@@ -86,8 +112,8 @@ OUTPUT SCHEMA (return exactly this):
 }"""
 
 
-def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1500) -> Optional[str]:
-    """Central LLM call function with robust error handling."""
+def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 800) -> Optional[str]:
+    """Central LLM call with reduced token budget."""
     if not OPENROUTER_API_KEY:
         logger.error("[llm] OPENROUTER_API_KEY not set")
         return None
@@ -109,7 +135,7 @@ def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1500) -> O
         "response_format": {"type": "json_object"}
     }
 
-    resp = requests.post(API_BASE, headers=headers, json=payload, timeout=90)
+    resp = requests.post(API_BASE, headers=headers, json=payload, timeout=30)
 
     if resp.status_code == 429:
         logger.warning("[llm] Rate limited (429). Will retry.")
@@ -124,16 +150,13 @@ def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 1500) -> O
 
 
 def _parse_json_safe(content: str) -> Optional[dict]:
-    """Robustly parse a JSON string from LLM output."""
+    """Robustly parse JSON from LLM output."""
     if not content:
         return None
-
-    # Strip markdown code fences if present
     content = re.sub(r"^```(?:json)?\s*", "", content.strip())
     content = re.sub(r"\s*```$", "", content.strip())
     content = content.strip()
 
-    # Auto-fix unclosed JSON (LLM truncation)
     open_braces = content.count("{") - content.count("}")
     if open_braces > 0:
         content += "}" * open_braces
@@ -141,27 +164,29 @@ def _parse_json_safe(content: str) -> Optional[dict]:
     try:
         return json.loads(content)
     except json.JSONDecodeError as e:
-        # Try extracting first JSON object
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group())
             except Exception:
                 pass
-        logger.error(f"[llm] JSON parse failed: {e} | Content snippet: {content[:100]}")
+        logger.error(f"[llm] JSON parse failed: {e}")
         return None
 
 
 # ─── STAGE 1: RAW EXTRACTION ─────────────────────────────────────────────────
-@retry_with_backoff(max_retries=3, base_delay=2.0, exceptions=(requests.RequestException, ValueError))
-def extract_raw_data(html_text: str, source_url: str, max_chars: int = 15000) -> Optional[dict]:
+@retry_with_backoff(max_retries=1, base_delay=1.0, exceptions=(requests.RequestException, ValueError))
+def extract_raw_data(html_text: str, source_url: str, max_chars: int = 6000) -> Optional[dict]:
     """
-    STAGE 1: Extract raw values from cleaned HTML text using LLM.
+    STAGE 1: Extract raw values from cleaned HTML using LLM.
+    Now with regex pre-extraction and packaging keyword check.
+    """
+    # Skip if no packaging-related content
+    if not has_packaging_content(html_text):
+        logger.info(f"[llm-s1] Skipping non-packaging page: {source_url}")
+        return None
 
-    The LLM only returns values it can literally see in the text.
-    Python validation (data_cleaner.py) runs AFTER this stage.
-    """
-    truncated = str(html_text)[:max_chars]
+    truncated = str(html_text)[:max_chars]  # type: ignore
 
     user_prompt = (
         f"Extract business information from this page text.\n"
@@ -169,7 +194,7 @@ def extract_raw_data(html_text: str, source_url: str, max_chars: int = 15000) ->
         f"PAGE TEXT:\n{truncated}"
     )
 
-    content = _call_llm(STAGE_1_SYSTEM, user_prompt, max_tokens=1500)
+    content = _call_llm(STAGE_1_SYSTEM, user_prompt, max_tokens=800)
     if not content:
         return None
 
@@ -178,9 +203,7 @@ def extract_raw_data(html_text: str, source_url: str, max_chars: int = 15000) ->
         return None
 
     data["source_url"] = source_url
-    logger.debug(f"[llm-s1] Extracted: {data.get('company_name', 'Unknown')} | "
-                 f"Phones:{len(data.get('phone_numbers', []))} | "
-                 f"GST:{len(data.get('gst_numbers', []))}")
+    logger.debug(f"[llm-s1] Extracted: {data.get('company_name', 'Unknown')}")
     return data
 
 
@@ -242,15 +265,9 @@ FINAL SCHEMA (map to exactly this):
 }"""
 
 
-@retry_with_backoff(max_retries=3, base_delay=2.0, exceptions=(requests.RequestException, ValueError))
+@retry_with_backoff(max_retries=1, base_delay=1.0, exceptions=(requests.RequestException, ValueError))
 def format_schema(validated_data: dict) -> Optional[dict]:
-    """
-    STAGE 2: Map strictly validated data into the final JSON schema using LLM.
-
-    Input comes from data_cleaner.validate_and_normalize() — all values are
-    guaranteed real (not hallucinated). LLM only does structural mapping here.
-    """
-    # Remove internal flags before sending to LLM
+    """STAGE 2: Map validated data into final JSON schema. Reduced tokens."""
     clean_input = {k: v for k, v in validated_data.items() if not k.startswith("_")}
 
     user_prompt = (
@@ -259,7 +276,7 @@ def format_schema(validated_data: dict) -> Optional[dict]:
         f"Return EXACT final schema JSON only."
     )
 
-    content = _call_llm(STAGE_2_SYSTEM, user_prompt, max_tokens=2048)
+    content = _call_llm(STAGE_2_SYSTEM, user_prompt, max_tokens=512)
     if not content:
         return None
 
@@ -267,8 +284,55 @@ def format_schema(validated_data: dict) -> Optional[dict]:
     if not data:
         return None
 
-    # Always override the source URL from Python side (never trust LLM for this)
+    # Always override source URL from Python side
     data["primary_source_url"] = validated_data.get("source_url", "")
 
     logger.debug(f"[llm-s2] Formatted: {data.get('company_name', 'Unknown')}")
     return data
+
+
+# ─── BATCH EXTRACTION (Parallel LLM) ─────────────────────────────────────────
+def extract_batch(
+    pages: list[tuple[str, str, str]],
+    max_chars: int = 6000,
+    max_workers: int = 3,
+) -> list[tuple[str, dict, str]]:
+    """
+    Extract raw data from multiple pages in parallel batches.
+    
+    Args:
+        pages: List of (url, html, source_platform) tuples
+        max_chars: HTML truncation limit
+        max_workers: Number of parallel LLM calls
+    
+    Returns:
+        List of (url, extracted_data, source_platform) tuples
+    """
+    results = []
+
+    def _extract_one(item: tuple[str, str, str]) -> Optional[tuple[str, dict, str]]:
+        url, html, platform = item
+        try:
+            from validator.data_cleaner import clean_html as dc_clean_html  # type: ignore
+            cleaned = dc_clean_html(html)
+            if len(cleaned) < 100:
+                return None
+            raw = extract_raw_data(cleaned, url, max_chars=max_chars)
+            if raw:
+                raw["source_platform"] = platform
+                return (url, raw, platform)
+        except Exception as e:
+            logger.warning(f"[llm-batch] Failed {url}: {e}")
+        return None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_extract_one, page): page for page in pages}  # type: ignore
+        for future in as_completed(futures):
+            try:
+                result = future.result(timeout=60)
+                if result:
+                    results.append(result)
+            except Exception as e:
+                logger.warning(f"[llm-batch] Batch item failed: {e}")
+
+    return results
